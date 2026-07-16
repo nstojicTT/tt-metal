@@ -22,6 +22,7 @@ from helpers.test_variant_parameters import (
 )
 
 
+@pytest.mark.perf
 @pytest.mark.onboarding
 @parametrize(
     formats=input_output_formats(
