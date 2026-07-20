@@ -2,29 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: "LLK onboarding perf"
+# Entry point for the onboarding perf test.
+# This file owns *when* the pipeline runs; the work lives in the reusable
+# implementation workflow (onboarding_perf-impl.yaml), which is matrix-driven
+# from tests/pipeline_reorg/onboarding_perf_tests.yaml.
 
 on:
+  # push: uses the workflow file FROM the pushed branch, so it runs on your own
+  # branch WITHOUT the file being on main. Branch-scoped so it doesn't burn
+  # hardware runners for everyone. Rename/remove the branch once merged.
   push:
     branches:
       - nstojicTT-feature-onboarding-test
     paths:
       - "tt_metal/tt-llk/tests/sources/eltwise_onboarding.cpp"
       - "tt_metal/tt-llk/tests/python_tests/perf_eltwise_onboarding.py"
+      - "tests/pipeline_reorg/onboarding_perf_tests.yaml"
       - ".github/workflows/onboarding_perf*.yaml"
 
+  # Manual trigger. This button only appears once the file is on the default
+  # branch (main) -- pre-merge, rely on the push trigger above.
   workflow_dispatch:
-    inputs:
-      chip_arch:
-        description: "Target architecture to run the onboarding test on"
-        required: true
-        default: "wormhole"
-        type: choice
-        options:
-          - wormhole
-          - blackhole
 
 permissions:
-  checks: write
+  checks: write # publish JUnit results as a check
   contents: read # checkout
   packages: write # pull the LLK CI docker image
 
@@ -34,8 +35,6 @@ concurrency:
 
 jobs:
   onboarding-perf:
-    name: "Onboarding perf (${{ inputs.chip_arch || 'wormhole' }})"
+    name: "Onboarding perf"
     uses: ./.github/workflows/onboarding_perf-impl.yaml
     secrets: inherit
-    with:
-      chip_arch: ${{ inputs.chip_arch || 'wormhole' }}

@@ -5,11 +5,6 @@ name: "LLK onboarding perf impl"
 
 on:
   workflow_call:
-    inputs:
-      chip_arch:
-        description: "wormhole | blackhole"
-        required: true
-        type: string
 
 permissions:
   checks: write
@@ -25,15 +20,46 @@ jobs:
     uses: ./.github/workflows/build-docker-artifact.yaml
     secrets: inherit
 
-  onboarding-exec:
+  load-test-matrix:
+    runs-on: ubuntu-latest
     needs: [build-images]
-    runs-on: ${{ inputs.chip_arch == 'blackhole' && 'tt-ubuntu-2204-P150b-stable' || 'tt-ubuntu-2204-N150-viommu-stable' }}
-    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+    env:
+      TESTS_YAML_PATH: ./tests/pipeline_reorg/onboarding_perf_tests.yaml
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        timeout-minutes: 20
+        with:
+          sparse-checkout: |
+            .github
+            tests/pipeline_reorg
+          sparse-checkout-cone-mode: true
+      - name: Install dependencies
+        run: pip3 install PyYAML
+      - name: Build test matrix
+        id: build-matrix
+        run: |
+          python3 .github/scripts/utils/prepare_test_matrix.py \
+            ${{ env.TESTS_YAML_PATH }} \
+            "ALL_SKUS_IN_TESTS" \
+            ./.github/sku_config.yaml
+
+  onboarding-exec:
+    needs: [load-test-matrix, build-images]
+    if: ${{ needs.load-test-matrix.outputs.matrix != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test-group: ${{ fromJSON(needs.load-test-matrix.outputs.matrix) }}
+    name: ${{ matrix.test-group.name }}
+    # Runner + timeout come from the matrix (i.e. from the SKU in the test-list).
+    runs-on: ${{ matrix.test-group.runs_on }}
+    timeout-minutes: ${{ matrix.test-group.timeout }}
     container:
       image: ${{ needs.build-images.outputs.llk-ci-tag }}
       options: "--rm --device /dev/tenstorrent --ulimit nofile=4096:4096"
-    env:
-      CHIP_ARCH: ${{ inputs.chip_arch }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -44,28 +70,31 @@ jobs:
         working-directory: ${{ env.LLK_PATH }}/tests
         run: ./setup_testing_env.sh
 
+      - name: Set CHIP_ARCH for logs and artifacts
+        shell: bash
+        env:
+          RUN_ON_LABELS: ${{ join(matrix.test-group.runs_on, ' ') }}
+        run: |
+          RUN_LABEL="${RUN_ON_LABELS%% *}"
+          if [[ "$RUN_LABEL" =~ N150 ]]; then
+            echo "CHIP_ARCH=wormhole" >> "$GITHUB_ENV"
+          elif [[ "$RUN_LABEL" =~ P150 ]]; then
+            echo "CHIP_ARCH=blackhole" >> "$GITHUB_ENV"
+          else
+            echo "CHIP_ARCH=unknown" >> "$GITHUB_ENV"
+          fi
+
       - name: Run onboarding perf test
         shell: bash
-        working-directory: ${{ env.LLK_PATH }}/tests/python_tests
+        working-directory: ${{ env.LLK_PATH }}
         run: |
-          set -euo pipefail
-          mkdir -p perf_data
-          # Two-phase flow (see tt-llk CLAUDE.md): the producer compiles every
-          # variant in parallel, the consumer runs them on hardware. `-m onboarding`
-          # selects ONLY our test, so this workflow never pulls in the rest of
-          # the perf suite even though other perf_*.py files are collected.
-          pytest -q --override-ini=log_cli=false --speed-of-light \
-            --compile-producer -n 10 -m onboarding --timeout=60 \
-            --junitxml=pytest-report-onboarding-compile.xml .
-          pytest -q --override-ini=log_cli=false --speed-of-light \
-            --compile-consumer -n 15 -x -m onboarding --timeout=60 \
-            --junitxml=pytest-report-onboarding-run.xml .
+          ${{ matrix.test-group.cmd }}
 
       - name: Upload test logs on failure
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         if: failure()
         with:
-          name: onboarding-logs-${{ inputs.chip_arch }}
+          name: onboarding-logs-${{ env.CHIP_ARCH }}-${{ matrix.test-group.split_group }}
           path: |
             ${{ env.LLK_PATH }}/tests/python_tests/test_run*.log
             ${{ env.LLK_PATH }}/tests/python_tests/test_errors*.log
@@ -74,8 +103,6 @@ jobs:
         uses: mikepenz/action-junit-report@v5
         if: always()
         with:
-          report_paths: |
-            ${{ env.LLK_PATH }}/tests/python_tests/pytest-report-onboarding-compile.xml
-            ${{ env.LLK_PATH }}/tests/python_tests/pytest-report-onboarding-run.xml
+          report_paths: ${{ env.LLK_PATH }}/tests/python_tests/pytest-report-onboarding-*.xml
           include_passed: true
           annotate_only: true

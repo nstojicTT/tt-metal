@@ -1,0 +1,17 @@
+- name: onboarding_perf
+  split_group: 1
+  team: llk
+  cmd: |
+    set -euo pipefail
+    cd tests/python_tests
+    mkdir -p perf_data
+    pytest -q --override-ini=log_cli=false --speed-of-light --compile-producer -n 10 \
+      -m onboarding --timeout=60 \
+      --junitxml=pytest-report-onboarding-{split_group}-compile.xml .
+    pytest -q --override-ini=log_cli=false --speed-of-light --compile-consumer -n 15 -x \
+      -m onboarding --timeout=60 \
+      --junitxml=pytest-report-onboarding-{split_group}-run.xml .
+  skus:
+    wh_n150_civ2:
+      timeout: 30
+  owner_id: U07J3K6KS1K
