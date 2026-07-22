@@ -9,7 +9,7 @@ struct RuntimeParams
 {
 };
 
-constexpr std::uint32_t STRESS_EVENT_COUNT = 600;
+constexpr std::uint32_t STRESS_EVENT_COUNT = 800;
 
 #ifdef LLK_TRISC_UNPACK
 
@@ -17,7 +17,7 @@ void run_kernel([[maybe_unused]] const struct RuntimeParams& params)
 {
     for (std::uint32_t i = 0; i < STRESS_EVENT_COUNT; i++)
     {
-        TIMESTAMP_DATA("STRESS", i);
+        TIMESTAMP("STRESS_TS");
     }
 }
 
@@ -27,10 +27,6 @@ void run_kernel([[maybe_unused]] const struct RuntimeParams& params)
 
 void run_kernel([[maybe_unused]] const struct RuntimeParams& params)
 {
-    for (std::uint32_t i = 0; i < STRESS_EVENT_COUNT; i++)
-    {
-        TIMESTAMP_DATA("STRESS", i);
-    }
 }
 
 #endif
@@ -39,10 +35,6 @@ void run_kernel([[maybe_unused]] const struct RuntimeParams& params)
 
 void run_kernel([[maybe_unused]] const struct RuntimeParams& params)
 {
-    for (std::uint32_t i = 0; i < STRESS_EVENT_COUNT; i++)
-    {
-        TIMESTAMP_DATA("STRESS", i);
-    }
 }
 
 #endif
