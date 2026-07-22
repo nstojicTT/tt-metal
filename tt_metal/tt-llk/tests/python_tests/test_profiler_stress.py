@@ -6,8 +6,9 @@ import pytest
 from conftest import skip_for_coverage, skip_for_quasar
 from helpers.logger import logger
 from helpers.perf import PerfConfig
-from helpers.profiler import Profiler
+from helpers.profiler import EntryType, Profiler
 from helpers.test_config import BuildMode, TestConfig
+from ttexalens.tt_exalens_lib import read_words_from_device
 
 EMITTED_TSDATA = 600
 EMITTED_ZONES = 600
@@ -121,3 +122,59 @@ def test_profiler_buffer_overflow_timestamps():
     assert timestamps == sorted(timestamps) and len(set(timestamps)) == len(
         timestamps
     ), "timestamps are not strictly increasing (bad decode or ordering)"
+
+
+@skip_for_coverage
+@skip_for_quasar
+def test_profiler_buffer_overrun_into_neighbor():
+    """Phase 2 — provoke the write-side reservation overrun (findings sec 6.1).
+
+    The unpack kernel fills its buffer near-full then opens a deep nest of zones.
+    is_buffer_full() reserves only 1 word per open zone, but each ZONE_END is 2
+    words and the destructor writes it unconditionally, so closing the nest should
+    push write_idx past the 1024-word buffer into the adjacent MATH buffer.
+
+    Detection: read the math buffer's first word directly (bypassing the parser,
+    which would raise on the corruption). A healthy math thread's first entry is its
+    own KERNEL ZONE_START; if unpack overran, that word is a stray ZONE_END.
+
+    A FAILURE here means we reproduced the overrun bug -- that is the goal of the
+    hunt. Once confirmed we decide whether to fix the reservation or mark this xfail
+    to document the known bug.
+    """
+    if TestConfig.BUILD_MODE == BuildMode.PRODUCE:
+        pytest.skip()
+
+    config = PerfConfig("sources/profiler_stress_overrun_test.cpp")
+    config.generate_variant_hash()
+    config.build_elfs()
+    config.run_elf_files()
+
+    # Read the math buffer raw. Math emitted nothing, so its first word must be its
+    # own KERNEL ZONE_START unless a neighbor overran into it.
+    math_addr = TestConfig.THREAD_PERFORMANCE_DATA_BUFFER[1]
+    words = read_words_from_device(
+        addr=math_addr,
+        word_count=8,
+        location=TestConfig.TENSIX_LOCATION,
+    )
+    kind = (words[0] & Profiler.ENTRY_TYPE_MASK) >> Profiler.ENTRY_TYPE_SHAMT
+    kind_name = {
+        EntryType.TIMESTAMP.value: "TIMESTAMP",
+        EntryType.TIMESTAMP_DATA.value: "TIMESTAMP_DATA",
+        EntryType.ZONE_START.value: "ZONE_START",
+        EntryType.ZONE_END.value: "ZONE_END",
+    }.get(kind, f"0b{kind:04b}")
+
+    logger.info(
+        "[overrun probe] math word0=0x{:08x} kind={} ({})",
+        int(words[0]),
+        kind_name,
+        "healthy" if kind == EntryType.ZONE_START.value else "OVERRUN from unpack!",
+    )
+
+    assert kind == EntryType.ZONE_START.value, (
+        f"Neighbor (math) buffer corrupted: first word is {kind_name}, expected ZONE_START. "
+        "Unpack's deeply-nested zone closes overran write_idx into the math buffer "
+        "(write-side reservation shortfall, findings sec 6.1). Bug reproduced."
+    )
