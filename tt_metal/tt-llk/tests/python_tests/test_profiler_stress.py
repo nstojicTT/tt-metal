@@ -10,6 +10,7 @@ from helpers.profiler import Profiler
 from helpers.test_config import BuildMode, TestConfig
 
 STRESS_EVENT_COUNT = 600
+EXPECTED_RETAINED = 255
 
 
 @skip_for_coverage
@@ -38,9 +39,11 @@ def test_profiler_buffer_overflow_stress():
         STRESS_EVENT_COUNT - retained,
     )
 
-    assert (
-        0 < retained < STRESS_EVENT_COUNT
-    ), f"Expected overflow (0 < retained < {STRESS_EVENT_COUNT}), got {retained}"
+    assert retained == EXPECTED_RETAINED, (
+        f"Buffer capacity changed: expected {EXPECTED_RETAINED} retained out of "
+        f"{STRESS_EVENT_COUNT} emitted, got {retained}. If this is intentional "
+        "(buffer size / guard / entry layout changed), update EXPECTED_RETAINED."
+    )
 
     assert data_values == list(
         range(retained)
