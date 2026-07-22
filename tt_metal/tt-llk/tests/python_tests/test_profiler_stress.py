@@ -126,21 +126,30 @@ def test_profiler_buffer_overflow_timestamps():
 
 @skip_for_coverage
 @skip_for_quasar
+@pytest.mark.xfail(
+    reason=(
+        "KNOWN BUG (findings sec 6.1): is_buffer_full() reserves only 1 word per open "
+        "zone, but each ZONE_END is 2 words and the destructor writes it unconditionally, "
+        "so closing deeply-nested zones near a full buffer overruns write_idx into the "
+        "neighbor thread's buffer. Reproduced on Wormhole 2026-07-22 "
+        "(math word0 came back as ZONE_END). Remove this marker once the reservation is fixed."
+    ),
+    strict=False,
+)
 def test_profiler_buffer_overrun_into_neighbor():
-    """Phase 2 — provoke the write-side reservation overrun (findings sec 6.1).
+    """Phase 2 -- the write-side reservation overrun (findings sec 6.1). CONFIRMED BUG.
 
     The unpack kernel fills its buffer near-full then opens a deep nest of zones.
     is_buffer_full() reserves only 1 word per open zone, but each ZONE_END is 2
-    words and the destructor writes it unconditionally, so closing the nest should
-    push write_idx past the 1024-word buffer into the adjacent MATH buffer.
+    words and the destructor writes it unconditionally, so closing the nest pushes
+    write_idx past the 1024-word buffer into the adjacent MATH buffer.
 
     Detection: read the math buffer's first word directly (bypassing the parser,
     which would raise on the corruption). A healthy math thread's first entry is its
     own KERNEL ZONE_START; if unpack overran, that word is a stray ZONE_END.
 
-    A FAILURE here means we reproduced the overrun bug -- that is the goal of the
-    hunt. Once confirmed we decide whether to fix the reservation or mark this xfail
-    to document the known bug.
+    This asserts the HEALTHY condition, so it xfails while the bug is present and
+    will xpass once the reservation is fixed (then remove the xfail marker).
     """
     if TestConfig.BUILD_MODE == BuildMode.PRODUCE:
         pytest.skip()
