@@ -145,6 +145,33 @@ def test_profiler_buffer_overrun_into_neighbor():
     config.build_elfs()
     config.run_elf_files()
 
+    def _kind_name(word):
+        kind = (word & Profiler.ENTRY_TYPE_MASK) >> Profiler.ENTRY_TYPE_SHAMT
+        return {
+            EntryType.TIMESTAMP.value: "TIMESTAMP",
+            EntryType.TIMESTAMP_DATA.value: "TIMESTAMP_DATA",
+            EntryType.ZONE_START.value: "ZONE_START",
+            EntryType.ZONE_END.value: "ZONE_END",
+        }.get(kind, f"0b{kind:04b}")
+
+    def _decode_entries(buf):
+        # Walk the entry stream (mirrors Profiler._parse_thread strides: every entry is
+        # >=2 words; TIMESTAMP_DATA is 4). Stops at the first empty word. Returns tuples
+        # of (word_index, kind_name, marker_id, timestamp).
+        out = []
+        i = 0
+        while i < len(buf):
+            word = int(buf[i])
+            if not (word & Profiler.ENTRY_EXISTS_BIT):
+                break
+            kind = (word & Profiler.ENTRY_TYPE_MASK) >> Profiler.ENTRY_TYPE_SHAMT
+            marker_id = (word & Profiler.ENTRY_ID_MASK) >> Profiler.ENTRY_ID_SHAMT
+            ts_high = word & Profiler.ENTRY_TIME_HIGH_MASK
+            ts_low = int(buf[i + 1]) if i + 1 < len(buf) else 0
+            out.append((i, _kind_name(word), marker_id, (ts_high << 32) | ts_low))
+            i += 4 if kind == EntryType.TIMESTAMP_DATA.value else 2
+        return out
+
     # Diagnostic: how full did UNPACK actually get, and did its zone closes cross the
     # 1024-word boundary into the math buffer? Count non-empty words in the unpack buffer
     # (final write_idx footprint) and dump the tail around the boundary. If write_idx
@@ -172,6 +199,23 @@ def test_profiler_buffer_overrun_into_neighbor():
             f"w{1012 + j}=0x{int(w):08x}" for j, w in enumerate(unpack_words[1012:])
         ),
     )
+    # Decode unpack's full stream. `contiguous` = index of the first empty word (where the
+    # walk stopped); if it is far below `unpack_fill`, write_idx wrote non-contiguously (a
+    # gap), which the documented "fill-then-spill" mechanism cannot produce. Log the tail
+    # entries with timestamps so they can be correlated with math's foreign entries.
+    unpack_entries = _decode_entries(unpack_words)
+    contiguous = (unpack_entries[-1][0] + 2) if unpack_entries else 0
+    logger.info(
+        "[overrun probe] unpack decoded {} entries, stream ends at word {} "
+        "(footprint {}); last 6 = {}",
+        len(unpack_entries),
+        contiguous,
+        unpack_fill,
+        [
+            f"w{idx}:{name}(id=0x{mid:04x},ts=0x{ts:011x})"
+            for idx, name, mid, ts in unpack_entries[-6:]
+        ],
+    )
 
     # Read a window of the math buffer raw. Math's kernel is empty, so a healthy math
     # buffer holds ONLY its own KERNEL zone: a ZONE_START at word 0 plus its ZONE_END,
@@ -188,27 +232,7 @@ def test_profiler_buffer_overrun_into_neighbor():
         location=TestConfig.TENSIX_LOCATION,
     )
 
-    def _kind_name(word):
-        kind = (word & Profiler.ENTRY_TYPE_MASK) >> Profiler.ENTRY_TYPE_SHAMT
-        return {
-            EntryType.TIMESTAMP.value: "TIMESTAMP",
-            EntryType.TIMESTAMP_DATA.value: "TIMESTAMP_DATA",
-            EntryType.ZONE_START.value: "ZONE_START",
-            EntryType.ZONE_END.value: "ZONE_END",
-        }.get(kind, f"0b{kind:04b}")
-
-    # Best-effort decode of the entry stream (mirrors Profiler._parse_thread strides:
-    # every entry is >=2 words; TIMESTAMP_DATA is 4). Stops at the first empty word.
-    entries = []  # list of (word_index, kind_name, marker_id)
-    i = 0
-    while i < len(words):
-        word = int(words[i])
-        if not (word & Profiler.ENTRY_EXISTS_BIT):
-            break
-        kind = (word & Profiler.ENTRY_TYPE_MASK) >> Profiler.ENTRY_TYPE_SHAMT
-        marker_id = (word & Profiler.ENTRY_ID_MASK) >> Profiler.ENTRY_ID_SHAMT
-        entries.append((i, _kind_name(word), marker_id))
-        i += 4 if kind == EntryType.TIMESTAMP_DATA.value else 2
+    entries = _decode_entries(words)
 
     # Full hex dump so the log is unambiguous even if the decode mis-strides on garbage.
     logger.info(
@@ -217,13 +241,16 @@ def test_profiler_buffer_overrun_into_neighbor():
         " ".join(f"w{idx}=0x{int(w):08x}" for idx, w in enumerate(words)),
     )
     logger.info(
-        "[overrun probe] decoded entries: {}",
-        [f"w{idx}:{name}(id=0x{mid:04x})" for idx, name, mid in entries],
+        "[overrun probe] math decoded entries: {}",
+        [
+            f"w{idx}:{name}(id=0x{mid:04x},ts=0x{ts:011x})"
+            for idx, name, mid, ts in entries
+        ],
     )
 
     word0_kind = (int(words[0]) & Profiler.ENTRY_TYPE_MASK) >> Profiler.ENTRY_TYPE_SHAMT
     kernel_id = (int(words[0]) & Profiler.ENTRY_ID_MASK) >> Profiler.ENTRY_ID_SHAMT
-    foreign = [(idx, name, mid) for idx, name, mid in entries if mid != kernel_id]
+    foreign = [(idx, name, mid) for idx, name, mid, _ in entries if mid != kernel_id]
     healthy = word0_kind == EntryType.ZONE_START.value and not foreign
 
     logger.info(
