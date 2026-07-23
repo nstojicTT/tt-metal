@@ -167,6 +167,18 @@ def resolve_macro(field: str, classes: set[str], class_to_macros, class_to_field
     return None, False, all_macros
 
 
+def per_field_macro(field: str, cls: str, class_to_macros, class_to_fields):
+    """Resolve ONE field within ONE class to its macro, or None if ambiguous."""
+    macros = class_to_macros.get(cls, set())
+    if field in macros:
+        return field
+    if field.upper() in macros:
+        return field.upper()
+    if len(class_to_fields.get(cls, [])) == 1 and len(macros) == 1:
+        return next(iter(macros))
+    return None
+
+
 # ── CSV discovery + header extraction ──────────────────────────────────
 
 
@@ -186,6 +198,90 @@ def read_header(path: Path) -> list[str]:
     with path.open(newline="") as f:
         row = next(csv.reader(f), [])
     return row
+
+
+# ── Static enumeration (no CSVs / no hardware) ─────────────────────────
+
+
+def run_static(field_to_classes, class_to_macros, class_to_fields) -> int:
+    """Enumerate EVERY possible parameter column and every misalignment from the
+    param definitions alone. Answers 'what is the full column vocabulary and
+    where can it drift?' without needing a perf run."""
+    # Per (class, field) macro resolution.
+    field_macros: dict[str, set[str]] = defaultdict(set)  # field -> {macros}
+    unresolved: list[tuple[str, str, set[str]]] = []  # (class, field, class macros)
+    for cls, fields in sorted(class_to_fields.items()):
+        for f in fields:
+            m = per_field_macro(f, cls, class_to_macros, class_to_fields)
+            if m:
+                field_macros[f].add(m)
+            else:
+                unresolved.append((cls, f, class_to_macros.get(cls, set())))
+
+    all_fields = sorted(field_to_classes)
+    print(
+        f"\nParameter classes: {len(class_to_fields)}   "
+        f"distinct field/column names: {len(all_fields)}\n"
+    )
+
+    print("=" * 78)
+    print("FULL PARAMETER-COLUMN VOCABULARY  (field -> class(es) -> macro)")
+    print("=" * 78)
+    for f in all_fields:
+        classes = sorted(field_to_classes[f])
+        macros = sorted(field_macros.get(f, set())) or ["?"]
+        print(f"  {f:<30} {'|'.join(macros):<28} {classes}")
+
+    # MERGE candidates: one macro, multiple field names.
+    macro_to_fields: dict[str, set[str]] = defaultdict(set)
+    for f, macros in field_macros.items():
+        for m in macros:
+            macro_to_fields[m].add(f)
+    print("\n" + "=" * 78)
+    print("MERGE CANDIDATES  (same C++ macro, DIFFERENT field/column names)")
+    print("=" * 78)
+    any_merge = False
+    for m, fs in sorted(macro_to_fields.items()):
+        if len(fs) > 1:
+            any_merge = True
+            print(f"  macro {m}:  " + "  vs  ".join(sorted(fs)))
+    if not any_merge:
+        print("  (none)")
+
+    # COLLISIONS: one field name, multiple classes emitting different macros.
+    print("\n" + "=" * 78)
+    print("COLLISIONS  (same field/column name, DIFFERENT classes/macros)")
+    print("=" * 78)
+    any_coll = False
+    for f in all_fields:
+        classes = field_to_classes[f]
+        macros = set()
+        for c in classes:
+            macros |= class_to_macros.get(c, set())
+        if len(classes) > 1 and len(macros) > 1:
+            any_coll = True
+            print(f"  {f}: classes {sorted(classes)} -> macros {sorted(macros)}")
+    if not any_coll:
+        print("  (none)")
+
+    # CONVENTION REVIEW: multi-field classes whose fields don't map 1:1 to a macro.
+    print("\n" + "=" * 78)
+    print(
+        "CONVENTION REVIEW  (multi-field classes; field<->macro not 1:1, judge by hand)"
+    )
+    print("=" * 78)
+    seen = set()
+    for cls, field, macros in unresolved:
+        if cls in seen:
+            continue
+        seen.add(cls)
+        print(
+            f"  {cls}: fields {class_to_fields.get(cls, [])} -> macros {sorted(macros)}"
+        )
+    if not seen:
+        print("  (none)")
+
+    return 0
 
 
 # ── Report ─────────────────────────────────────────────────────────────
@@ -216,7 +312,22 @@ def main() -> int:
         default=None,
         help="Optional: write the column x test matrix here",
     )
+    ap.add_argument(
+        "--static",
+        action="store_true",
+        help="Enumerate the full column vocabulary + all misalignments from the "
+        "param definitions ALONE (no CSVs, no hardware).",
+    )
     args = ap.parse_args()
+
+    # Build the field/macro maps from the param definitions + local classes.
+    param_files = [args.params] + sorted(args.tests_dir.glob("perf_*.py"))
+    field_to_classes, class_to_macros, class_to_fields = parse_param_classes(
+        param_files
+    )
+
+    if args.static:
+        return run_static(field_to_classes, class_to_macros, class_to_fields)
 
     # Locate perf_data
     perf_data = args.perf_data
@@ -228,12 +339,6 @@ def main() -> int:
     if perf_data is None or not perf_data.is_dir():
         print("ERROR: could not find perf_data dir. Pass --perf-data explicitly.")
         return 1
-
-    # Build the field/macro maps from the param definitions + local classes.
-    param_files = [args.params] + sorted(args.tests_dir.glob("perf_*.py"))
-    field_to_classes, class_to_macros, class_to_fields = parse_param_classes(
-        param_files
-    )
 
     csvs = find_perf_csvs(perf_data)
     if not csvs:
