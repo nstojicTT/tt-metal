@@ -8,7 +8,11 @@ from helpers.logger import logger
 from helpers.perf import PerfConfig
 from helpers.profiler import EntryType, Profiler, ProfilerFullMarker
 from helpers.test_config import BuildMode, TestConfig
-from ttexalens.tt_exalens_lib import read_words_from_device
+from ttexalens.tt_exalens_lib import (
+    parse_elf,
+    read_word_from_device,
+    read_words_from_device,
+)
 
 EMITTED_TSDATA = 600
 EMITTED_ZONES = 600
@@ -144,6 +148,50 @@ def test_profiler_buffer_overrun_into_neighbor():
     config.generate_variant_hash()
     config.build_elfs()
     config.run_elf_files()
+
+    # Read the final write_idx / open_zone_cnt globals straight from each thread's L1
+    # image (same mechanism as coverage extraction: resolve the symbol from the ELF, read
+    # the word from the device). This is the number the buffer dump cannot give us: if
+    # unpack's write_idx reads ~1030 while its buffer tail (words ~956..1023) reads as
+    # zero, the "gap" is a data-cache write-back artifact -- the tail writes never reached
+    # L1 before we read it -- and write_idx crossing 1024 into the neighbor is the real,
+    # deterministic overrun.
+    variant_dir = TestConfig.ARTEFACTS_DIR / config.test_name / config.variant_id
+    for thread_name in ("unpack", "math", "pack"):
+        try:
+            syms = parse_elf(variant_dir / f"elf/{thread_name}.elf").symbols
+
+            def _sym_addr(needle):
+                hits = [
+                    v.value for k, v in syms.items() if needle in k and "profiler" in k
+                ]
+                if not hits:
+                    hits = [v.value for k, v in syms.items() if needle in k]
+                return hits[0] if hits else None
+
+            wi_addr, oc_addr = _sym_addr("write_idx"), _sym_addr("open_zone_cnt")
+            wi = (
+                read_word_from_device(TestConfig.TENSIX_LOCATION, addr=wi_addr)
+                if wi_addr
+                else None
+            )
+            oc = (
+                read_word_from_device(TestConfig.TENSIX_LOCATION, addr=oc_addr)
+                if oc_addr
+                else None
+            )
+            logger.info(
+                "[overrun probe] {} globals: write_idx={} (@0x{:x}) open_zone_cnt={} (@0x{:x})",
+                thread_name,
+                wi,
+                wi_addr or 0,
+                oc,
+                oc_addr or 0,
+            )
+        except (
+            Exception
+        ) as exc:  # diagnostic only -- never fail the test on a read miss
+            logger.info("[overrun probe] {} globals: unreadable ({})", thread_name, exc)
 
     def _kind_name(word):
         kind = (word & Profiler.ENTRY_TYPE_MASK) >> Profiler.ENTRY_TYPE_SHAMT
