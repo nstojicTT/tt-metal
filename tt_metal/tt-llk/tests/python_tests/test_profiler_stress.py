@@ -145,6 +145,34 @@ def test_profiler_buffer_overrun_into_neighbor():
     config.build_elfs()
     config.run_elf_files()
 
+    # Diagnostic: how full did UNPACK actually get, and did its zone closes cross the
+    # 1024-word boundary into the math buffer? Count non-empty words in the unpack buffer
+    # (final write_idx footprint) and dump the tail around the boundary. If write_idx
+    # stayed <= 1024, no overrun happened and the recipe no longer stresses the guard.
+    BUFFER_LENGTH = 0x400  # 1024 words/thread; mirrors profiler.h BUFFER_LENGTH
+    unpack_addr = TestConfig.THREAD_PERFORMANCE_DATA_BUFFER[0]
+    unpack_words = read_words_from_device(
+        addr=unpack_addr,
+        word_count=BUFFER_LENGTH,
+        location=TestConfig.TENSIX_LOCATION,
+    )
+    # Footprint = last non-zero word + 1. Reliable because init memsets the buffer to 0
+    # and entries are written contiguously; a second-word timestamp can have any bits, so
+    # counting the exists-bit would over-count.
+    nonzero = [j for j, w in enumerate(unpack_words) if int(w) != 0]
+    unpack_fill = (nonzero[-1] + 1) if nonzero else 0
+    logger.info(
+        "[overrun probe] unpack write_idx footprint: {} / {} words ({} free); "
+        "{} boundary; tail w1012..w1023 = {}",
+        unpack_fill,
+        BUFFER_LENGTH,
+        BUFFER_LENGTH - unpack_fill,
+        "REACHED" if unpack_fill >= BUFFER_LENGTH else "did NOT reach",
+        " ".join(
+            f"w{1012 + j}=0x{int(w):08x}" for j, w in enumerate(unpack_words[1012:])
+        ),
+    )
+
     # Read a window of the math buffer raw. Math's kernel is empty, so a healthy math
     # buffer holds ONLY its own KERNEL zone: a ZONE_START at word 0 plus its ZONE_END,
     # every entry carrying the same KERNEL marker id. We scan the whole window (not just
